@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: utpl-horarios
+    runtime: python
+    plan: starter        # o free/starter/pro; elige según tu cuenta
+    autoDeploy: true
+    buildCommand: pip install -r requirements.txt
+    startCommand: streamlit run app.py --server.port $PORT --server.address 0.0.0.0
+    envVars:
+      - key: DATA_DIR
+        value: /var/data
+      - key: ADMIN_PIN
+        sync: false       # márcalo como secreto; lo pones luego en el panel
+      - key: PYTHON_VERSION
+        value: 3.12.3     # opcional: fija versión
+    disk:
+      name: horarios-data
+      mountPath: /var/data
+      sizeGB: 1           # ajusta según lo que necesites
