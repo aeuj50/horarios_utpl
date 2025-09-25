@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+env/
+
+# Streamlit
+.streamlit/
+
+# Datos locales (no subir al repo)
+data/*.xlsx
+data/backups/
+data/*.csv
+
+# Archivos temporales de mac
+.DS_Store
