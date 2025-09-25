@@ -429,6 +429,42 @@ def replace_docentes_from_upload(uploaded_file):
     return df_new
 
 
+def reset_master_to_empty():
+    """
+    Deja horarios_master.xlsx vacío (con mismas columnas), de forma segura:
+    - Hace backup previo (en BACKUP_DIR)
+    - Usa FileLock para evitar escrituras concurrentes
+    """
+    ensure_data_dir()
+    # 1) Backup del master actual
+    backup_master(reason="reset")
+
+    # 2) Reescribir el master vacío con sus columnas
+    cols = [
+        "row_id","timestamp","docente","tipo_docente",
+        "asignatura","paralelo","paralelo_codigo","ciclo","dia",
+        "sincronía_inicio","sincronía_fin","tutoría_inicio","tutoría_fin"
+    ]
+    df_empty = pd.DataFrame(columns=cols)
+
+    lock = FileLock(LOCK_PATH, timeout=10)
+    with lock:
+        with pd.ExcelWriter(MASTER_XLSX, engine="openpyxl") as writer:
+            df_empty.to_excel(writer, index=False, sheet_name=MASTER_SHEET)
+
+
+def list_master_backups():
+    """Lista backups de horarios_master.xlsx en BACKUP_DIR (de más nuevo a más viejo)."""
+    try:
+        files = [f for f in os.listdir(BACKUP_DIR)
+                 if f.startswith("horarios_master_") and f.endswith(".xlsx")]
+        return sorted(files, reverse=True)
+    except Exception:
+        return []
+
+
+
+
 # =========================
 # REGLAS Y LÓGICA
 # =========================
@@ -1096,7 +1132,7 @@ with tab_reg:
     st.markdown("---")
 
     # Consolidado rápido
-    st.subheader("📊 Vista consolidada (por defecto: Cronograma por ciclo)")
+    st.subheader("📊 Vista consolidada")
     df_master = load_master()
     if df_master.empty:
         st.info("Aún no hay registros en el consolidado.")
@@ -1478,15 +1514,53 @@ with tab_admin:
 
 
 
-    st.caption("Sugerencia: configura la variable de entorno ADMIN_PIN para no hardcodear el PIN. "
+    st.caption("..."
                "Tras reemplazar el archivo, la app limpia cachés y recarga datos automáticamente.")
 
+    st.markdown("---")
+    st.subheader("🧹 Borrar/limpiar registros (horarios_master.xlsx)")
+
+    with st.expander("Mostrar opciones de borrado", expanded=False):
+        st.warning("Esta acción vacía **todos** los registros del consolidado. Se hará un backup automático antes de borrar.")
+        colc1, colc2 = st.columns([1,1])
+
+        # Confirmación y botón de vaciado completo
+        with colc1:
+            confirm_text = st.text_input("Escribe BORRAR para confirmar", value="", key="confirm_reset_master")
+            confirm_ok = (confirm_text.strip().upper() == "BORRAR")
+            btn_reset = st.button("🧹 Vaciar registros (empezar de cero)", disabled=not confirm_ok, type="primary", key="btn_reset_master")
+
+        # Restaurar un backup del master (opcional)
+        with colc2:
+            st.caption("Restaurar un backup del consolidado (opcional):")
+            backups_m = list_master_backups()
+            if backups_m:
+                pick_m = st.selectbox("Selecciona un backup de horarios_master.xlsx",
+                                      options=["(Ninguno)"]+backups_m, key="restore_master_pick")
+                if pick_m != "(Ninguno)":
+                    if st.button("↩️ Restaurar este backup del consolidado", key="btn_restore_master"):
+                        lock = FileLock(LOCK_PATH, timeout=10)
+                        with lock:
+                            backup_master(reason="before-restore")  # respaldo del actual antes de restaurar
+                            shutil.copy2(os.path.join(BACKUP_DIR, pick_m), MASTER_XLSX)
+                        st.success(f"Restaurado: {pick_m}")
+                        st.cache_data.clear()
+                        st.rerun()
+
+        # Ejecuta el vaciado si se confirmó
+        if btn_reset:
+            try:
+                reset_master_to_empty()
+                st.success("Consolidado vaciado correctamente. (Backup creado en /backups/).")
+                st.cache_data.clear()
+                st.rerun()
+            except Timeout:
+                st.error("El archivo está en uso. Intenta nuevamente en unos segundos.")
+            except Exception as e:
+                st.error(f"Error al vaciar: {e}")
 
 
-st.caption("Tips: define **franjas por día** en `docentes.xlsx` (p. ej. `lunes_ini/lunes_fin`). "
-           "Si no las pones, L–V usa la franja global. "
-           "Sábado SOLO aparece si lo declaras explícitamente en `dias_permitidos`. "
-           "Backups automáticos en `data/backups/`. "
-           "En Render, configura DATA_DIR=/var/data y usa un disco persistente.")
+
+st.caption("")
 
 
