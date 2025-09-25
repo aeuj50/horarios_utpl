@@ -28,6 +28,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 from filelock import FileLock, Timeout
+from tempfile import NamedTemporaryFile
 
 # =========================
 # CONSTANTES / RUTAS
@@ -375,6 +376,57 @@ def to_excel_bytes(df: pd.DataFrame, sheet_name: str) -> io.BytesIO:
         df.to_excel(writer, index=False, sheet_name=sheet_name)
     buf.seek(0)
     return buf
+
+def replace_docentes_from_upload(uploaded_file):
+    """
+    Reemplaza data/docentes.xlsx con el archivo subido (validado).
+    - Guarda a un temporal con sufijo .xlsx
+    - Valida que pueda leerse la hoja 'docentes'
+    - Hace backup del docentes.xlsx actual (si existe)
+    - Mueve el temporal a la ruta final (reemplazo atómico)
+    """
+    ensure_data_dir()
+
+    # 1) Guardar a un TEMP con extensión .xlsx
+    with NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp:
+        tmp.write(uploaded_file.getbuffer())
+        tmp.flush()
+        tmp_path = tmp.name
+
+    # 2) Validar que se puede leer la hoja 'docentes'
+    try:
+        df_new = pd.read_excel(tmp_path, sheet_name=DOCENTES_SHEET, engine="openpyxl")
+    except Exception as e:
+        os.remove(tmp_path)
+        raise RuntimeError(f"Archivo inválido: {e}")
+
+    # 3) Validaciones mínimas de esquema
+    required = ["docente","tipo_docente","asignatura","paralelo_codigo","ciclo","dias_permitidos","franja_inicio","franja_fin"]
+    missing = [c for c in required if c not in df_new.columns]
+    if missing:
+        os.remove(tmp_path)
+        raise RuntimeError(f"Faltan columnas obligatorias: {', '.join(missing)}")
+
+    # 4) Backup del docentes.xlsx actual (si existe)
+    try:
+        if os.path.exists(DOCENTES_XLSX):
+            ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+            backup_path = os.path.join(BACKUP_DIR, f"docentes_{ts}.xlsx")
+            shutil.copy2(DOCENTES_XLSX, backup_path)
+    except Exception as e:
+        # No detenemos el proceso por falla de backup; solo avisamos arriba en UI
+        print(f"[WARN] No se pudo crear backup de docentes.xlsx: {e}")
+
+    # 5) Reemplazo atómico
+    try:
+        shutil.move(tmp_path, DOCENTES_XLSX)
+    except Exception as e:
+        os.remove(tmp_path)
+        raise RuntimeError(f"Error al reemplazar docentes.xlsx: {e}")
+
+    # 6) Limpiar cachés de lectura
+    st.cache_data.clear()
+    return df_new
 
 
 # =========================
@@ -1407,19 +1459,24 @@ with tab_admin:
 
         st.write("Vista previa del archivo subido:")
         st.dataframe(new_df.head(15), use_container_width=True)
-
+        
         can_apply = ok  # solo permitimos reemplazar si pasa validación estricta
-        if st.button("✅ Reemplazar docentes.xlsx", disabled=not can_apply):
+        if st.button("✅ Reemplazar docentes.xlsx", disabled=not can_apply, type="primary"):
             try:
-                write_docentes_atomic(new_df)
-                st.success("Archivo reemplazado correctamente.")
-                # Limpiar caché y recargar dataframes
+                # Reemplazo seguro a partir del archivo subido (no del DF),
+                # con validación, backup y movimiento atómico.
+                replace_docentes_from_upload(up)
+                st.success("✅ Archivo reemplazado correctamente en /var/data/docentes.xlsx.")
                 st.cache_data.clear()
                 st.rerun()
             except Timeout:
                 st.error("Archivo en uso. Intenta nuevamente en unos segundos.")
+            except RuntimeError as e:
+                st.error(str(e))
             except Exception as e:
-                st.error(f"Error al reemplazar: {e}")
+                st.error(f"Error inesperado al reemplazar: {e}")
+
+
 
     st.caption("Sugerencia: configura la variable de entorno ADMIN_PIN para no hardcodear el PIN. "
                "Tras reemplazar el archivo, la app limpia cachés y recarga datos automáticamente.")
