@@ -780,6 +780,16 @@ def compute_completion(df_doc: pd.DataFrame, df_master: pd.DataFrame):
             "pendientes": max(total_exp - total_comp, 0),
             "estado": "✅ Completo" if total_exp>0 and total_comp>=total_exp else "⏳ Pendiente"
         })
+    
+    # --- añadir este guard justo antes del sort ---
+    if len(rows) == 0:
+        df_status = pd.DataFrame(columns=["docente","esperados","completados","pendientes","estado"])
+        total_docentes = 0
+        completos = 0
+        pendientes = 0
+        return df_status, total_docentes, completos, pendientes, exp, comp
+    # --- fin del guard ---
+
     df_status = pd.DataFrame(rows).sort_values(["estado","docente"])
     total_docentes = len(docentes)
     completos = (df_status["estado"]=="✅ Completo").sum()
