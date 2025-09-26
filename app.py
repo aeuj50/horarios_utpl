@@ -3,17 +3,16 @@
 UTPL - Administración de Empresas
 Registro y Edición de Horarios (Streamlit) + Dashboard + Backups + Franjas por día
 
-Cambios clave en esta versión:
-- Sábado deshabilitado por defecto. SOLO se habilita si en docentes.xlsx 'dias_permitidos' incluye "Sábado".
-  (No hay auto-inclusión por tipo, ni por columnas sabado_ini/fin.)
+Cambios clave endurecidos en esta versión:
+- Validador HH:MM estricto (00:00–23:59).
+- Sábado deshabilitado por defecto salvo que 'dias_permitidos' lo incluya.
 - Conflictos:
-  * Global: SOLO se validan cruces de SINCRONÍA entre ASIGNATURAS DISTINTAS en el mismo ciclo y día.
-    (Sincronías de la MISMA asignatura sí pueden solaparse, p.ej. paralelos distintos.)
-  * Self: para un MISMO docente, NO se permiten cruces/solapes de NINGÚN tipo (ni SINC ni TUT) con sus propios registros,
-    en el mismo día (independientemente del ciclo o asignatura). Se valida al sugerir y al guardar/editar.
-- Sugerencias (sincronía/tutoría) ya filtran conflictos propios del docente.
-- Backups automáticos al registrar/editar (retención configurable).
-- DATA_DIR configurable por variable de entorno (para Render). Escrituras con FileLock para evitar corrupción.
+  * Global: cruces de SINCRONÍA entre ASIGNATURAS DISTINTAS en mismo ciclo/día.
+  * Self: ningún cruce propio (SINC/TUT) del mismo docente en mismo día.
+- Sugerencias filtran conflictos propios.
+- Backups automáticos con retención configurable.
+- DATA_DIR por entorno. Escrituras con FileLock.
+- Flujos de “Tutorías EXTRA” encapsulados en la pestaña Registrar y Editar con claves de widget/estado separadas.
 """
 
 import os
@@ -40,7 +39,7 @@ MASTER_XLSX = os.path.join(DATA_DIR, "horarios_master.xlsx")
 MASTER_SHEET = "horarios"
 
 BACKUP_DIR = os.path.join(DATA_DIR, "backups")
-LOCK_PATH = os.path.join(DATA_DIR, ".master.lock")  # lock para escrituras concurrentes
+LOCK_PATH = os.path.join(DATA_DIR, ".master.lock")  # lock para escrituras concurrentes master
 MAX_BACKUPS = 60  # retención de copias
 
 # --- ADMIN / UPLOADER ---
@@ -94,7 +93,8 @@ def normalize_day_token(tok: str) -> str:
     base = normalize_key(tok).replace("-", " ").strip()
     return DAY_ALIASES.get(base, tok.strip())
 
-HHMM_RE = re.compile(r"^[0-2]\d:[0-5]\d$")  # validación básica HH:MM (24h)
+# Regex HH:MM ESTRICTO (00–23 horas)
+HHMM_RE = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
 
 def is_hhmm(s: str) -> bool:
     return isinstance(s, str) and bool(HHMM_RE.match(s or ""))
@@ -178,7 +178,6 @@ def create_master_if_missing():
             "sincronía_inicio","sincronía_fin","tutoría_inicio","tutoría_fin"
         ]
         df = pd.DataFrame(columns=cols)
-        # Guardado inicial
         lock = FileLock(LOCK_PATH, timeout=10)
         try:
             with lock:
@@ -274,7 +273,6 @@ def load_master():
                 df[c] = df[c].astype(str)
         if "ciclo" in df.columns:
             df["ciclo"] = pd.to_numeric(df["ciclo"], errors="coerce")
-    # NO escribimos aquí (lectura pura). row_id se garantiza al guardar.
     return _ensure_row_ids(df)
 
 def save_master(df_master):
@@ -339,18 +337,57 @@ def backup_docentes(reason: str = "upload"):
         print(f"[ERROR] backup_docentes: {e}")
         return None
 
+def list_master_backups() -> list[str]:
+    """Lista backups de horarios_master.xlsx en BACKUP_DIR (de más nuevo a más viejo)."""
+    try:
+        files = [
+            f for f in os.listdir(BACKUP_DIR)
+            if f.startswith("horarios_master_") and f.endswith(".xlsx")
+        ]
+        # Ordenar por fecha de modificación (más reciente primero)
+        files = sorted(files, key=lambda n: os.path.getmtime(os.path.join(BACKUP_DIR, n)), reverse=True)
+        return files
+    except Exception:
+        return []
+
+def reset_master_to_empty():
+    """
+    Deja horarios_master.xlsx vacío (con mismas columnas), de forma segura:
+    - Hace backup previo (en BACKUP_DIR)
+    - Usa FileLock para evitar escrituras concurrentes
+    """
+    ensure_data_dir()
+
+    # 1) Backup del master actual (si existe)
+    backup_master(reason="reset")
+
+    # 2) Reescribir el master vacío con sus columnas
+    cols = [
+        "row_id","timestamp","docente","tipo_docente",
+        "asignatura","paralelo","paralelo_codigo","ciclo","dia",
+        "sincronía_inicio","sincronía_fin","tutoría_inicio","tutoría_fin"
+    ]
+    df_empty = pd.DataFrame(columns=cols)
+
+    lock = FileLock(LOCK_PATH, timeout=10)
+    try:
+        with lock:
+            with pd.ExcelWriter(MASTER_XLSX, engine="openpyxl") as writer:
+                df_empty.to_excel(writer, index=False, sheet_name=MASTER_SHEET)
+    except Timeout:
+        st.error("El archivo está en uso. Intenta nuevamente en unos segundos.")
+        raise
+
+
 def write_docentes_atomic(df_new: pd.DataFrame):
     """Escritura segura del docentes.xlsx (sheet 'docentes') con lock + reemplazo atómico."""
     ensure_data_dir()
     tmp_path = DOCENTES_XLSX + ".tmp"
     lock = FileLock(DOCENTES_LOCK_PATH, timeout=10)
     with lock:
-        # 1) Backup del archivo actual (si existía)
         backup_docentes(reason="prewrite")
-        # 2) Escribir a .tmp
         with pd.ExcelWriter(tmp_path, engine="openpyxl") as writer:
             df_new.to_excel(writer, index=False, sheet_name=DOCENTES_SHEET)
-        # 3) Reemplazo atómico
         os.replace(tmp_path, DOCENTES_XLSX)
 
 def list_docentes_backups(limit: int = 15) -> list[str]:
@@ -383,7 +420,7 @@ def replace_docentes_from_upload(uploaded_file):
     - Guarda a un temporal con sufijo .xlsx
     - Valida que pueda leerse la hoja 'docentes'
     - Hace backup del docentes.xlsx actual (si existe)
-    - Mueve el temporal a la ruta final (reemplazo atómico)
+    - Mueve el temporal a la ruta final (reemplazo atómico) BAJO LOCK
     """
     ensure_data_dir()
 
@@ -395,74 +432,54 @@ def replace_docentes_from_upload(uploaded_file):
 
     # 2) Validar que se puede leer la hoja 'docentes'
     try:
-        df_new = pd.read_excel(tmp_path, sheet_name=DOCENTES_SHEET, engine="openpyxl")
+        _ = pd.read_excel(tmp_path, sheet_name=DOCENTES_SHEET, engine="openpyxl")
     except Exception as e:
         os.remove(tmp_path)
         raise RuntimeError(f"Archivo inválido: {e}")
 
-    # 3) Validaciones mínimas de esquema
-    required = ["docente","tipo_docente","asignatura","paralelo_codigo","ciclo","dias_permitidos","franja_inicio","franja_fin"]
-    missing = [c for c in required if c not in df_new.columns]
-    if missing:
-        os.remove(tmp_path)
-        raise RuntimeError(f"Faltan columnas obligatorias: {', '.join(missing)}")
-
-    # 4) Backup del docentes.xlsx actual (si existe)
+    # 3) Reemplazo atómico con FileLock + backup defensivo
+    lock = FileLock(DOCENTES_LOCK_PATH, timeout=10)
     try:
-        if os.path.exists(DOCENTES_XLSX):
-            ts = datetime.now().strftime("%Y%m%d-%H%M%S")
-            backup_path = os.path.join(BACKUP_DIR, f"docentes_{ts}.xlsx")
-            shutil.copy2(DOCENTES_XLSX, backup_path)
-    except Exception as e:
-        # No detenemos el proceso por falla de backup; solo avisamos arriba en UI
-        print(f"[WARN] No se pudo crear backup de docentes.xlsx: {e}")
+        with lock:
+            # Validar esquema mínimo ya con el DF (vuelve a cargar rápido para tener columnas)
+            df_new = pd.read_excel(tmp_path, sheet_name=DOCENTES_SHEET, engine="openpyxl")
+            required = ["docente","tipo_docente","asignatura","paralelo_codigo","ciclo","dias_permitidos","franja_inicio","franja_fin"]
+            missing = [c for c in required if c not in df_new.columns]
+            if missing:
+                os.remove(tmp_path)
+                raise RuntimeError(f"Faltan columnas obligatorias: {', '.join(missing)}")
 
-    # 5) Reemplazo atómico
-    try:
-        shutil.move(tmp_path, DOCENTES_XLSX)
-    except Exception as e:
-        os.remove(tmp_path)
-        raise RuntimeError(f"Error al reemplazar docentes.xlsx: {e}")
+            # Backup del actual si existe
+            if os.path.exists(DOCENTES_XLSX):
+                ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+                backup_path = os.path.join(BACKUP_DIR, f"docentes_{ts}.xlsx")
+                try:
+                    shutil.copy2(DOCENTES_XLSX, backup_path)
+                except Exception as e:
+                    print(f"[WARN] No se pudo crear backup de docentes.xlsx: {e}")
 
-    # 6) Limpiar cachés de lectura
-    st.cache_data.clear()
-    return df_new
+            # Reemplazo atómico
+            shutil.move(tmp_path, DOCENTES_XLSX)
 
-
-def reset_master_to_empty():
-    """
-    Deja horarios_master.xlsx vacío (con mismas columnas), de forma segura:
-    - Hace backup previo (en BACKUP_DIR)
-    - Usa FileLock para evitar escrituras concurrentes
-    """
-    ensure_data_dir()
-    # 1) Backup del master actual
-    backup_master(reason="reset")
-
-    # 2) Reescribir el master vacío con sus columnas
-    cols = [
-        "row_id","timestamp","docente","tipo_docente",
-        "asignatura","paralelo","paralelo_codigo","ciclo","dia",
-        "sincronía_inicio","sincronía_fin","tutoría_inicio","tutoría_fin"
-    ]
-    df_empty = pd.DataFrame(columns=cols)
-
-    lock = FileLock(LOCK_PATH, timeout=10)
-    with lock:
-        with pd.ExcelWriter(MASTER_XLSX, engine="openpyxl") as writer:
-            df_empty.to_excel(writer, index=False, sheet_name=MASTER_SHEET)
-
-
-def list_master_backups():
-    """Lista backups de horarios_master.xlsx en BACKUP_DIR (de más nuevo a más viejo)."""
-    try:
-        files = [f for f in os.listdir(BACKUP_DIR)
-                 if f.startswith("horarios_master_") and f.endswith(".xlsx")]
-        return sorted(files, reverse=True)
+    except Timeout:
+        # si expira el lock, borrar el temp si sigue existiendo
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+        raise RuntimeError("Archivo en uso (docentes.xlsx). Intenta nuevamente en unos segundos.")
     except Exception:
-        return []
+        # borrar temp en cualquier otra excepción
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+        raise
+    finally:
+        # limpiar temp si hubiera quedado
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
 
-
+    # 4) Limpiar cachés de lectura
+    st.cache_data.clear()
+    # 5) Devolver dataframe final (ya persistido)
+    return pd.read_excel(DOCENTES_XLSX, sheet_name=DOCENTES_SHEET, engine="openpyxl")
 
 
 # =========================
@@ -507,13 +524,13 @@ def _get_excel_day_window(row, day_name):
 
 def effective_windows_by_day(row_docente):
     """
-    Ventanas efectivas por día (con franjas por día y fallbacks):
-      - 'dias_permitidos' manda SIEMPRE. Si se especifica, solo se consideran esos días (incluyendo Sábado SOLO si aparece).
-      - Si 'dias_permitidos' está vacío: se consideran L–V (NO se auto-incluye sábado ni domingo).
-      - Para cada día elegido:
-          * Si existe <dia>_ini/<dia>_fin en Excel -> base del día = esas columnas.
-          * Si no existen y es L–V, se usa franja_inicio/franja_fin (si existen).
-      - SIEMPRE se intersecta con la ventana del TIPO para ese día (si la hay).
+    Ventanas efectivas por día:
+      - 'dias_permitidos' manda. Si se especifica, solo esos días (Sábado solo si aparece).
+      - Si 'dias_permitidos' está vacío: L–V por defecto.
+      - Para cada día:
+          * Si existe <dia>_ini/<dia>_fin -> base del día.
+          * Si no y es L–V, usa franja_inicio/franja_fin (si existen).
+      - Intersección con ventana del TIPO para ese día.
     """
     tipo_val = str(row_docente.get("tipo_docente","")).strip()
     f_ini = str(row_docente.get("franja_inicio","") or "").strip()
@@ -540,7 +557,6 @@ def effective_windows_by_day(row_docente):
             base_day = (f_ini, f_fin)
 
         if base_day is not None:
-            # Intersección base_day con el TIPO
             if vtipo_list:
                 for (vt_ini, vt_fin) in vtipo_list:
                     ok, i_ini, i_fin = _intersect(base_day[0], base_day[1], vt_ini, vt_fin)
@@ -549,13 +565,12 @@ def effective_windows_by_day(row_docente):
             else:
                 out.setdefault(d, []).append(base_day)
         else:
-            # Sin base_day: usar ventana del TIPO (si existe) para ese día
             for (vt_ini, vt_fin) in vtipo_list:
                 ok, i_ini, i_fin = _intersect(vt_ini, vt_fin, vt_ini, vt_fin)
                 if ok:
                     out.setdefault(d, []).append((i_ini, i_fin))
 
-    # Limpieza
+    # Limpieza / dedupe
     for d in list(out.keys()):
         uniq = []
         seen = set()
@@ -580,9 +595,6 @@ def ventanas_tipo_for_day(tipo_docente, dia):
 def hay_conflicto_sync_global(df_master, ciclo, dia, asignatura, s_ini, s_fin, exclude_row_id=None):
     """
     Conflicto si en el mismo ciclo y mismo día existe OTRA asignatura cuya sincronía se solape.
-    - Mismo ciclo + mismo día + asignatura distinta -> NO puede solaparse la sincronía.
-    - Mismo ciclo + mismo día + misma asignatura -> SÍ puede solaparse (paralelos distintos permitidos).
-    Se ignoran tutorías completamente aquí.
     """
     if s_ini is None or s_fin is None:
         return False, ""
@@ -595,7 +607,6 @@ def hay_conflicto_sync_global(df_master, ciclo, dia, asignatura, s_ini, s_fin, e
     df_same_cycle_day = df_check[mask]
     for _, row in df_same_cycle_day.iterrows():
         asig_row = str(row.get("asignatura",""))
-        # misma asignatura => permitido
         if normalize_key(asig_row) == normalize_key(asignatura or ""):
             continue
         if overlaps(s_ini, s_fin, row.get("sincronía_inicio",""), row.get("sincronía_fin","")):
@@ -604,9 +615,7 @@ def hay_conflicto_sync_global(df_master, ciclo, dia, asignatura, s_ini, s_fin, e
 
 def hay_conflicto_self(docente, df_master, dia, s_ini, s_fin, t_ini, t_fin, exclude_row_id=None):
     """
-    Conflictos propios del mismo docente (independiente de ciclo/asignatura), para el MISMO día:
-    - La nueva SINCRONÍA no puede solaparse con NINGÚN bloque propio (ni sinc ni tut) ya existente ese día.
-    - La nueva TUTORÍA tampoco puede solaparse con NINGÚN bloque propio (ni sinc ni tut) ya existente ese día.
+    Conflictos propios del mismo docente (independiente de ciclo/asignatura), para el MISMO día.
     """
     if not docente:
         return False, ""
@@ -617,14 +626,11 @@ def hay_conflicto_self(docente, df_master, dia, s_ini, s_fin, t_ini, t_fin, excl
     mask_self = (df_check["docente"].str.lower()==docente.lower()) & (df_check["dia"]==dia)
     df_self = df_check[mask_self]
 
-    # Verificar solapes de la nueva sincronía con cualquiera de mis bloques existentes
     for _, r in df_self.iterrows():
         if overlaps(s_ini, s_fin, r.get("sincronía_inicio",""), r.get("sincronía_fin","")):
             return True, "Cruce con tu propia sincronía."
         if overlaps(s_ini, s_fin, r.get("tutoría_inicio",""), r.get("tutoría_fin","")):
             return True, "Cruce con tu propia tutoría."
-
-    # Verificar solapes de la nueva tutoría con cualquiera de mis bloques existentes
     for _, r in df_self.iterrows():
         if overlaps(t_ini, t_fin, r.get("sincronía_inicio",""), r.get("sincronía_fin","")):
             return True, "La tutoría propuesta cruza con tu propia sincronía."
@@ -644,9 +650,6 @@ def tutorias_cumple_18_19(df_master, docente):
 def sugerir_sincronia(row_docente, df_master):
     """
     Propone sincronías válidas (1h) por día según ventanas efectivas y sin conflictos.
-    Valida:
-      - Conflicto GLOBAL de sincronía (asignaturas distintas en mismo ciclo/día).
-      - Auto-conflicto con bloques del mismo docente (sinc y tut) en ese día.
     """
     ciclo_val = int(row_docente["ciclo"]) if "ciclo" in row_docente else None
     asignatura_val = str(row_docente.get("asignatura",""))
@@ -658,11 +661,9 @@ def sugerir_sincronia(row_docente, df_master):
         for (i_ini, i_fin) in rangos:
             for s in time_range(i_ini, i_fin, STEP_MIN):
                 fin = (_t(s) + timedelta(minutes=SYNC_SLOT_MIN)).strftime(TIME_FMT)
-                # Debe caber completo
                 if not inside_interval(fin, i_ini, i_fin) and fin != i_fin:
                     continue
 
-                # Global (solo sinc)
                 conflict_g, _ = hay_conflicto_sync_global(
                     df_master=df_master, ciclo=ciclo_val, dia=d,
                     asignatura=asignatura_val, s_ini=s, s_fin=fin
@@ -670,7 +671,6 @@ def sugerir_sincronia(row_docente, df_master):
                 if conflict_g:
                     continue
 
-                # Self-conflict (probar con tut ficticia vacía hasta elegir tutoría)
                 conflict_s, _ = hay_conflicto_self(
                     docente=docente_val, df_master=df_master, dia=d,
                     s_ini=s, s_fin=fin, t_ini="00:00", t_fin="00:00"
@@ -684,30 +684,24 @@ def sugerir_sincronia(row_docente, df_master):
 def tutorias_posibles(tipo_docente, dia, sincronia_inicio, row_context_for_excel=None,
                       docente=None, df_master=None):
     """
-    Calcula tutorías de 2h alrededor de la sincronía:
-      - Intersecta ventanas del TIPO y del Excel (si se pasa contexto).
-      - Excluye auto-conflictos del docente (con sus propios bloques en ese mismo día).
+    Calcula tutorías de 2h alrededor de la sincronía.
     """
     tipo_windows = ventanas_tipo_for_day(tipo_docente, dia)
     if not tipo_windows:
         return []
 
-    # Intersección con Excel (si existe)
     excel_windows = []
     if row_context_for_excel is not None:
         eff_all = effective_windows_by_day(row_context_for_excel)
         excel_windows = eff_all.get(dia, [])
 
-    if not excel_windows:
-        base_windows = tipo_windows
-    else:
-        base_windows = []
+    base_windows = tipo_windows if not excel_windows else []
+    if excel_windows:
         for (ti, tf) in tipo_windows:
             for (ei, ef) in excel_windows:
                 ok, ii, ff = _intersect(ti, tf, ei, ef)
                 if ok:
                     base_windows.append((ii, ff))
-
     if not base_windows:
         return []
 
@@ -730,7 +724,6 @@ def tutorias_posibles(tipo_docente, dia, sincronia_inicio, row_context_for_excel
     if encaja(A_ini, A_fin): candidatos.append(("A", A_ini, A_fin))
     if encaja(B_ini, B_fin): candidatos.append(("B", B_ini, B_fin))
 
-    # Filtrar auto-conflictos del docente (si se proporcionó contexto)
     if docente and df_master is not None:
         filtrados = []
         for (k, ti, tf) in candidatos:
@@ -744,6 +737,125 @@ def tutorias_posibles(tipo_docente, dia, sincronia_inicio, row_context_for_excel
         return filtrados
 
     return candidatos
+
+# --- Tutorías EXTRA para filas con múltiples paralelos ----------------------
+def count_paralelos(paralelo_codigo: str) -> int:
+    """Cuenta códigos separados por coma en paralelo_codigo."""
+    return len([p.strip() for p in str(paralelo_codigo or "").split(",") if p.strip()])
+
+def is_extra_row(row: dict | pd.Series) -> bool:
+    """Fila del master que representa SOLO tutoría (sin sincronía)."""
+    s_ini = str(row.get("sincronía_inicio","") or "")
+    t_ini = str(row.get("tutoría_inicio","") or "")
+    return (not is_hhmm(s_ini)) and is_hhmm(t_ini)
+
+def extra_tutorias_registradas(df_master: pd.DataFrame, docente: str, asignatura: str,
+                               paralelo_codigo: str, ciclo: int) -> int:
+    """Cuenta cuántas tutorías-EXTRA hay registradas para la misma clave."""
+    if df_master.empty:
+        return 0
+    m = (
+        (df_master["docente"].str.lower()==(docente or "").lower()) &
+        (df_master["asignatura"]==asignatura) &
+        (df_master["paralelo_codigo"]==paralelo_codigo) &
+        (df_master["ciclo"]==ciclo)
+    )
+    dfk = df_master[m].copy()
+    if dfk.empty:
+        return 0
+    return sum([is_extra_row(r) for _, r in dfk.iterrows()])
+
+def _windows_base_lj(row_docente: dict) -> dict[str, list[tuple[str,str]]]:
+    """
+    Ventanas base SOLO L–J, priorizando <dia>_ini/<dia>_fin; si no, franja_inicio/franja_fin.
+    Intersecta con la ventana del tipo de docente.
+    """
+    dias_lj = ["Lunes","Martes","Miércoles","Jueves"]
+    tipo_val = str(row_docente.get("tipo_docente","")).strip()
+    f_ini = str(row_docente.get("franja_inicio","") or "").strip()
+    f_fin = str(row_docente.get("franja_fin","") or "").strip()
+    vtipo = ventanas_tipo_docente(tipo_val)
+
+    out = {}
+    for d in dias_lj:
+        base_day = _get_excel_day_window(row_docente, d)
+        if base_day is None and is_hhmm(f_ini) and is_hhmm(f_fin):
+            base_day = (f_ini, f_fin)
+        if base_day is None:
+            continue
+        tipo_ranges = vtipo.get(d, [])
+        if tipo_ranges:
+            for ti, tf in tipo_ranges:
+                ok, ii, ff = _intersect(base_day[0], base_day[1], ti, tf)
+                if ok:
+                    out.setdefault(d, []).append((ii, ff))
+        else:
+            out.setdefault(d, []).append(base_day)
+
+    for d in list(out.keys()):
+        uniq, seen = [], set()
+        for a,b in out[d]:
+            if not (is_hhmm(a) and is_hhmm(b) and a < b): 
+                continue
+            k = f"{a}-{b}"
+            if k not in seen:
+                seen.add(k); uniq.append((a,b))
+        if uniq:
+            out[d] = uniq
+        else:
+            del out[d]
+    return out
+
+def sugerir_tutorias_extra(row_docente: dict, df_master: pd.DataFrame) -> list[tuple[str,str,str]]:
+    """
+    Sugerencias de TUTORÍA EXTRA (2h) en L–J, sin choques propios.
+    """
+    docente = str(row_docente.get("docente",""))
+    if not docente:
+        return []
+
+    ventanas = _windows_base_lj(row_docente)
+    opciones = []
+    for d, rangos in ventanas.items():
+        for (i_ini, i_fin) in rangos:
+            for s in time_range(i_ini, i_fin, STEP_MIN):  # pasos de 60'
+                fin = (_t(s) + timedelta(minutes=TUTOR_SLOT_MIN)).strftime(TIME_FMT)
+                if not inside_interval(fin, i_ini, i_fin) and fin != i_fin:
+                    continue
+
+                conf_s, _ = hay_conflicto_self(
+                    docente=docente, df_master=df_master, dia=d,
+                    s_ini="00:00", s_fin="00:00", t_ini=s, t_fin=fin
+                )
+                if conf_s:
+                    continue
+                opciones.append((d, s, fin))
+    return opciones
+
+def _rows_overlap(dia1, i1, f1, dia2, i2, f2) -> bool:
+    """True si (dia1,i1–f1) cruza con (dia2,i2–f2)."""
+    if dia1 != dia2:
+        return False
+    return overlaps(i1, f1, i2, f2)
+
+def _filter_non_overlapping_options(options, already_picked):
+    """
+    Devuelve opciones que no se crucen con las ya elegidas.
+    """
+    if not already_picked:
+        return options
+    out = []
+    for (d, ti, tf) in options:
+        ok = True
+        for (pd, pti, ptf) in already_picked:
+            if _rows_overlap(d, ti, tf, pd, pti, ptf):
+                ok = False; break
+        if ok:
+            out.append((d, ti, tf))
+    return out
+
+def _option_label(dia, ini, fin):
+    return f"{dia} {ini}–{fin}"
 
 # =========================
 # UI Helpers
@@ -868,15 +980,10 @@ def compute_completion(df_doc: pd.DataFrame, df_master: pd.DataFrame):
             "pendientes": max(total_exp - total_comp, 0),
             "estado": "✅ Completo" if total_exp>0 and total_comp>=total_exp else "⏳ Pendiente"
         })
-    
-    # --- añadir este guard justo antes del sort ---
     if len(rows) == 0:
         df_status = pd.DataFrame(columns=["docente","esperados","completados","pendientes","estado"])
-        total_docentes = 0
-        completos = 0
-        pendientes = 0
+        total_docentes = completos = pendientes = 0
         return df_status, total_docentes, completos, pendientes, exp, comp
-    # --- fin del guard ---
 
     df_status = pd.DataFrame(rows).sort_values(["estado","docente"])
     total_docentes = len(docentes)
@@ -890,6 +997,7 @@ def pending_items_for_docente(docente: str, exp_df: pd.DataFrame, comp_df: pd.Da
     comp_keys = set(comp_df[comp_df["docente_norm"]==dn]["key"].tolist())
     pend = exp_keys[~exp_keys["key"].isin(comp_keys)][["asignatura","paralelo_codigo","ciclo"]]
     return pend
+
 
 # =========================
 # APP
@@ -912,7 +1020,6 @@ df_master = load_master()
 st.markdown("---")
 
 tab_reg, tab_edit, tab_dash, tab_admin = st.tabs(["📝 Registrar", "✏️ Editar", "📊 Dashboard", "🛠️ Admin"])
-
 
 # =====================================================
 # ===================== REGISTRAR =====================
@@ -988,9 +1095,8 @@ with tab_reg:
                 row_base = rb.iloc[0]
                 tipo_docente_val = str(row_base["tipo_docente"])
                 ciclo_val = int(row_base["ciclo"]) if "ciclo" in row_base else 1
-                # IMPORTANTE: forzar que el contexto lleve el nombre del docente (para self-conflict)
                 row_base = row_base.to_dict()
-                row_base["docente"] = docente_input
+                row_base["docente"] = docente_input  # para self-conflict
                 eff = effective_windows_by_day(row_base)
                 dias_txt = ", ".join([f"{d}({'; '.join([a+'–'+b for (a,b) in eff[d]])})" for d in eff])
                 st.success(f"**Ciclo:** {ciclo_val} | **Tipo:** `{tipo_docente_val}` | **Ventanas efectivas:** {dias_txt}")
@@ -1039,6 +1145,104 @@ with tab_reg:
 
     st.markdown("---")
 
+    # -------------------------------------------------
+    # Tutorías EXTRA (dentro de Registrar)
+    # -------------------------------------------------
+    if row_base is not None:
+        total_pars = count_paralelos(str(row_base.get("paralelo_codigo","")))
+        extras_totales = max(0, total_pars - 1)
+
+        extras_done = extra_tutorias_registradas(
+            df_master, docente_input, asignatura_sel, paralelo_codigo_sel, int(ciclo_val or 1)
+        )
+        extras_restantes = max(0, extras_totales - extras_done)
+
+        st.subheader("➕ Tutorías extra por múltiples paralelos")
+        colx1, colx2, colx3 = st.columns(3)
+        colx1.metric("Paralelos en la fila", total_pars)
+        colx2.metric("Tutorías extra requeridas", extras_totales)
+        colx3.metric("Pendientes de declarar", extras_restantes)
+
+        # Clave de contexto (docente|asignatura|paralelo|ciclo)
+        ctx_key = f"{docente_input}|{asignatura_sel}|{paralelo_codigo_sel}|{ciclo_val}"
+
+        # Limpiar picks si cambia el contexto (y limpiar claves legadas)
+        if st.session_state.get("extra_ctx_key") != ctx_key:
+            for k in list(st.session_state.keys()):
+                if k.startswith("extra_pick_") or k.startswith("reg_extra_pick_"):
+                    del st.session_state[k]
+            st.session_state["extra_ctx_key"] = ctx_key
+
+        if extras_restantes <= 0:
+            st.success("No tienes tutorías extra pendientes para esta fila.")
+        else:
+            st.info(
+                "Debes declarar **{n}** tutoría(s) extra de **2h** (L–J), dentro de tu franja base, "
+                "sin cruzarse con tus propios bloques y sin solaparse entre sí."
+                .format(n=extras_restantes)
+            )
+
+            # Contexto con nombre para validar choques propios
+            row_ctx_extra = dict(row_base)
+            row_ctx_extra["docente"] = docente_input
+
+            # Opciones base (sin choques con el consolidado)
+            base_opts = sugerir_tutorias_extra(row_ctx_extra, df_master)
+
+            if not base_opts:
+                st.error("No hay ningún bloque válido (L–J) disponible para tutorías extra.")
+            else:
+                # Orden determinista por (día, inicio, fin)
+                def _sort_key(opt):
+                    d, ti, tf = opt
+                    day_idx = DAYS_FULL.index(d) if d in DAYS_FULL else 99
+                    return (day_idx, ti, tf)
+                base_opts = sorted(base_opts, key=_sort_key)
+
+                # Limpieza defensiva de cualquier clave antigua
+                for _k in list(st.session_state.keys()):
+                    if _k.startswith("extra_pick_"):
+                        del st.session_state[_k]
+
+                # Construye picks con claves separadas (índice/elección)
+                picks = []
+                for i in range(extras_restantes):
+                    valid_opts = _filter_non_overlapping_options(base_opts, picks)
+                    if not valid_opts:
+                        st.error(
+                            "No hay suficientes bloques **no solapados** para cumplir todas tus tutorías extra. "
+                            "Ajusta tu sincronía o tutoría principal."
+                        )
+                        break
+
+                    labels = [_option_label(d, ti, tf) for (d, ti, tf) in valid_opts]
+
+                    widget_key = f"reg_extra_pick_idx__{ctx_key}_{i}"     # índice del widget
+                    memory_key = f"reg_extra_pick_choice__{ctx_key}_{i}"  # tupla elegida
+
+                    prev_choice = st.session_state.get(memory_key)
+                    default_index = valid_opts.index(prev_choice) if prev_choice in valid_opts else 0
+
+                    sel_idx = st.selectbox(
+                        f"Elige tutoría extra #{i+1} (2h)",
+                        options=list(range(len(valid_opts))),
+                        format_func=lambda k: labels[k],
+                        index=default_index,
+                        key=widget_key
+                    )
+                    choice = valid_opts[sel_idx]
+
+                    # Persistir elección en clave distinta del widget
+                    st.session_state[memory_key] = choice
+
+                    # Reflejar en lista local (para filtrar las siguientes)
+                    if len(picks) <= i:
+                        picks.append(choice)
+                    else:
+                        picks[i] = choice
+
+        st.markdown("---")
+
     # Paso 6: Validaciones
     st.subheader("6) Validaciones")
     conflict_global, msg_global = False, ""
@@ -1052,12 +1256,10 @@ with tab_reg:
         dia_sel, sinc_ini_sel, sinc_fin_sel = sincronia_pick
         _, tut_ini, tut_fin = tut_pick
 
-        # Global: solo sinc entre asignaturas distintas en mismo ciclo/día
         conflict_global, msg_global = hay_conflicto_sync_global(
             df_master=df_master, ciclo=int(row_base["ciclo"]), dia=dia_sel,
             asignatura=str(row_base["asignatura"]), s_ini=sinc_ini_sel, s_fin=sinc_fin_sel
         )
-        # Self: el mismo docente no puede cruzar nada con lo suyo (sinc/tut)
         conflict_self, msg_self = hay_conflicto_self(
             docente=docente_input, df_master=df_master, dia=dia_sel,
             s_ini=sinc_ini_sel, s_fin=sinc_fin_sel, t_ini=tut_ini, t_fin=tut_fin
@@ -1084,7 +1286,26 @@ with tab_reg:
 
     # Paso 7: Guardar
     st.subheader("7) Guardar registro")
-    can_submit = (docente_input and asignatura_sel and paralelo_codigo_sel and sincronia_pick and tut_pick and not conflict_global and not conflict_self)
+
+    # Requisito: tutorías extra (si aplica) deben estar seleccionadas (claves de CHOICE)
+    extras_required_unpicked = False
+    if row_base is not None:
+        total_pars__btn = count_paralelos(str(row_base.get("paralelo_codigo","")))
+        extras_totales__btn = max(0, total_pars__btn - 1)
+        if extras_totales__btn > 0:
+            ctx_key = f"{docente_input}|{asignatura_sel}|{paralelo_codigo_sel}|{ciclo_val}"
+            for i in range(extras_totales__btn):
+                if f"reg_extra_pick_choice__{ctx_key}_{i}" not in st.session_state:
+                    extras_required_unpicked = True
+                    break
+
+    can_submit = (
+        docente_input and asignatura_sel and paralelo_codigo_sel and
+        sincronia_pick and tut_pick and
+        not conflict_global and not conflict_self and
+        not extras_required_unpicked
+    )
+
     save_btn = st.button("✅ Guardar registro", disabled=not can_submit, key="save_reg")
     if not can_submit:
         st.info("Completa los pasos y resuelve advertencias para habilitar el guardado.")
@@ -1092,7 +1313,71 @@ with tab_reg:
     if save_btn:
         dia_sel, sinc_ini_sel, sinc_fin_sel = sincronia_pick
         _, tut_ini, tut_fin = tut_pick
-        # Duplicado exacto
+
+        # Construcción y validaciones de tutorías extra
+        extras_rows = []
+        if row_base is not None:
+            total_pars = count_paralelos(str(row_base.get("paralelo_codigo","")))
+            extras_totales = max(0, total_pars - 1)
+            if extras_totales > 0:
+                ctx_key = f"{docente_input}|{asignatura_sel}|{paralelo_codigo_sel}|{ciclo_val}"
+                picks = []
+                for i in range(extras_totales):
+                    memory_key = f"reg_extra_pick_choice__{ctx_key}_{i}"
+                    chosen = st.session_state.get(memory_key)
+                    if not chosen:
+                        st.error("Debes seleccionar **todas** tus tutorías extra antes de guardar.")
+                        st.stop()
+                    picks.append(chosen)
+
+                for (dia_e, t_ini_e, t_fin_e) in picks:
+                    if dia_e == dia_sel and overlaps(t_ini_e, t_fin_e, sinc_ini_sel, sinc_fin_sel):
+                        st.error("Una tutoría extra cruza con la sincronía principal elegida. Ajusta la selección.")
+                        st.stop()
+                    if dia_e == dia_sel and overlaps(t_ini_e, t_fin_e, tut_ini, tut_fin):
+                        st.error("Una tutoría extra cruza con tu tutoría principal. Ajusta la selección.")
+                        st.stop()
+                    dup_extra_mask = (
+                        (df_master["docente"].str.lower() == docente_input.lower()) &
+                        (df_master["asignatura"] == asignatura_sel) &
+                        (df_master["paralelo_codigo"] == paralelo_codigo_sel) &
+                        (df_master["ciclo"] == ciclo_val) &
+                        (df_master["dia"] == dia_e) &
+                        (df_master["sincronía_inicio"].astype(str).fillna("") == "") &
+                        (df_master["sincronía_fin"].astype(str).fillna("") == "") &
+                        (df_master["tutoría_inicio"] == t_ini_e) &
+                        (df_master["tutoría_fin"] == t_fin_e)
+                    )
+                    if dup_extra_mask.any():
+                        st.error(f"Esa tutoría extra ({dia_e} {t_ini_e}-{t_fin_e}) ya existe. Ajusta la selección.")
+                        st.stop()
+
+                for i in range(len(picks)):
+                    for j in range(i+1, len(picks)):
+                        di, ti, fi = picks[i]
+                        dj, tj, fj = picks[j]
+                        if _rows_overlap(di, ti, fi, dj, tj, fj):
+                            st.error("Dos tutorías extra elegidas se solapan entre sí. Ajusta tus selecciones.")
+                            st.stop()
+
+                for (dia_e, t_ini_e, t_fin_e) in picks:
+                    extras_rows.append({
+                        "row_id": str(uuid.uuid4()),
+                        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        "docente": docente_input,
+                        "tipo_docente": tipo_docente_val,
+                        "asignatura": asignatura_sel,
+                        "paralelo": None,
+                        "paralelo_codigo": paralelo_codigo_sel,
+                        "ciclo": int(ciclo_val or 1),
+                        "dia": dia_e,
+                        "sincronía_inicio": "",   # marca EXTRA
+                        "sincronía_fin": "",
+                        "tutoría_inicio": t_ini_e,
+                        "tutoría_fin": t_fin_e
+                    })
+
+        # Duplicado exacto para la fila principal
         dup_mask = (
             (df_master["docente"].str.lower()==docente_input.lower()) &
             (df_master["asignatura"]==asignatura_sel) &
@@ -1122,11 +1407,15 @@ with tab_reg:
                 "tutoría_inicio": tut_ini,
                 "tutoría_fin": tut_fin
             }
-            df_master_new = pd.concat([df_master, pd.DataFrame([new_row])], ignore_index=True)
+            df_master_new = pd.concat([df_master, pd.DataFrame([new_row] + extras_rows)], ignore_index=True)
+
             save_master(df_master_new)
             backup_master(reason="register")
             st.success("¡Registro guardado!")
             record_card(new_row)
+            for er in extras_rows:
+                record_card(er, title="➕ Tutoría extra guardada")
+
             st.cache_data.clear()
 
     st.markdown("---")
@@ -1180,6 +1469,7 @@ with tab_reg:
                                               start="07:00", end="22:00", step=60, paralelo_filter=par_me_val)
                     st.dataframe(styled, use_container_width=True)
 
+
 # =====================================================
 # ======================= EDITAR ======================
 # =====================================================
@@ -1217,110 +1507,235 @@ with tab_edit:
                     st.info("No hay registros que coincidan con los filtros.")
                 else:
                     df_me2 = df_me2.reset_index(drop=True)
+
                     def label_row(i):
                         r = df_me2.iloc[i]
-                        return f"[{r['row_id'][:8]}] {r['asignatura']} ({r['paralelo_codigo']}) · Ciclo {int(r['ciclo'])} · {r['dia']} " \
-                               f"SINC {r['sincronía_inicio']}-{r['sincronía_fin']} | TUT {r['tutoría_inicio']}-{r['tutoría_fin']}"
+                        try:
+                            _is_extra = is_extra_row(r)
+                        except Exception:
+                            _is_extra = False
+                        if _is_extra:
+                            return (f"[{r['row_id'][:8]}] {r['asignatura']} ({r['paralelo_codigo']}) · "
+                                    f"Ciclo {int(r['ciclo'])} · {r['dia']} "
+                                    f"TUT-EXTRA {r['tutoría_inicio']}-{r['tutoría_fin']}")
+                        else:
+                            return (f"[{r['row_id'][:8]}] {r['asignatura']} ({r['paralelo_codigo']}) · "
+                                    f"Ciclo {int(r['ciclo'])} · {r['dia']} "
+                                    f"SINC {r['sincronía_inicio']}-{r['sincronía_fin']} | "
+                                    f"TUT {r['tutoría_inicio']}-{r['tutoría_fin']}")
+
                     idx_row = st.selectbox("Selecciona el registro", options=list(range(len(df_me2))),
                                            format_func=label_row, key="edit_row_pick")
                     row_current = df_me2.iloc[idx_row].to_dict()
 
-                    # Buscar contexto de docentes.xlsx para ese (docente, asignatura, paralelo, ciclo)
+                    # Detectar si la fila es EXTRA
+                    is_extra = is_extra_row(row_current)
+
+                    # Buscar contexto en docentes.xlsx
                     map_df = df_doc[
                         (df_doc["docente"].str.lower()==docente_edit.lower()) &
                         (df_doc["asignatura"]==row_current["asignatura"]) &
                         (df_doc["paralelo_codigo"]==row_current["paralelo_codigo"]) &
                         (df_doc["ciclo"]==int(row_current["ciclo"]))
                     ]
+
                     if map_df.empty:
-                        # fallback amplio L–V
                         row_ctx = {
                             "docente": row_current["docente"],
                             "tipo_docente": row_current["tipo_docente"],
                             "asignatura": row_current["asignatura"],
                             "paralelo_codigo": row_current["paralelo_codigo"],
                             "ciclo": int(row_current["ciclo"]),
-                            "dias_permitidos": "Lunes,Martes,Miércoles,Miércoles,Jueves,Viernes".replace("Miércoles,Miércoles","Miércoles"),
+                            "dias_permitidos": "Lunes,Martes,Miércoles,Jueves,Viernes",
                             "franja_inicio": "07:00",
                             "franja_fin": "22:00"
                         }
-                        st.warning("No encontré la fila en docentes.xlsx para este registro; usando configuración por defecto (L–V 07:00–22:00).")
+                        st.warning("No encontré la fila en docentes.xlsx; usando configuración por defecto (L–V 07:00–22:00).")
                     else:
                         row_ctx = map_df.iloc[0].to_dict()
-                        row_ctx["docente"] = docente_edit  # para self-conflict
+                        row_ctx["docente"] = docente_edit  # para validaciones de self-conflict
 
                     st.markdown("---")
-                    st.subheader("C) Nueva sincronía (1 hora)")
-                    df_for_suggest = df_master[df_master["row_id"]!=row_current["row_id"]]
-                    sinc_opts = sugerir_sincronia(row_ctx, df_for_suggest)
-                    if not sinc_opts:
-                        st.error("No hay opciones de sincronía válidas con las ventanas actuales.")
-                        st.stop()
-                    etiquetas = [f"{d} {ini}–{fin}" for (d, ini, fin) in sinc_opts]
-                    try:
-                        pre_idx = sinc_opts.index((row_current["dia"], row_current["sincronía_inicio"], row_current["sincronía_fin"]))
-                    except ValueError:
-                        pre_idx = 0
-                    idx_new_sinc = st.selectbox("Elige sincronía", options=list(range(len(etiquetas))),
-                                                format_func=lambda i: etiquetas[i], index=pre_idx, key="edit_sinc_pick")
-                    new_dia, new_sinc_ini, new_sinc_fin = sinc_opts[idx_new_sinc]
 
-                    st.subheader("D) Nueva tutoría (2 horas)")
-                    tut_opts = tutorias_posibles(
-                        str(row_ctx.get("tipo_docente","")), new_dia, new_sinc_ini,
-                        row_context_for_excel=row_ctx, docente=docente_edit, df_master=df_master[df_master["row_id"]!=row_current["row_id"]]
-                    )
-                    if not tut_opts:
-                        st.error("No hay opciones de tutoría válidas con esa sincronía. Elige otra sincronía.")
-                    labels_tut = [f"Opción {k}: {ti}–{tf}" for (k, ti, tf) in tut_opts]
-                    pre_tut_idx = 0
-                    for i,(k,ti,tf) in enumerate(tut_opts):
-                        if ti==row_current["tutoría_inicio"] and tf==row_current["tutoría_fin"] and new_dia==row_current["dia"]:
-                            pre_tut_idx = i; break
-                    idx_new_tut = st.selectbox("Elige tutoría", options=list(range(len(labels_tut))),
-                                               format_func=lambda i: labels_tut[i], index=pre_tut_idx, key="edit_tut_pick")
-                    _, new_tut_ini, new_tut_fin = tut_opts[idx_new_tut]
+                    if is_extra:
+                        # -------------- EDICIÓN: TUTORÍA EXTRA (sin sincronía) --------------
+                        st.subheader("C) Nueva tutoría extra (2 horas)")
 
-                    st.markdown("---")
-                    st.subheader("E) Validaciones y guardado")
-                    conflict_global, msg_global = hay_conflicto_sync_global(
-                        df_master=df_master, ciclo=int(row_ctx["ciclo"]), dia=new_dia,
-                        asignatura=str(row_ctx["asignatura"]), s_ini=new_sinc_ini, s_fin=new_sinc_fin,
-                        exclude_row_id=row_current["row_id"]
-                    )
-                    conflict_self, msg_self = hay_conflicto_self(
-                        docente=docente_edit, df_master=df_master, dia=new_dia,
-                        s_ini=new_sinc_ini, s_fin=new_sinc_fin, t_ini=new_tut_ini, t_fin=new_tut_fin,
-                        exclude_row_id=row_current["row_id"]
-                    )
-                    if conflict_global:
-                        st.error(f"❌ Conflicto de sincronía: {msg_global}")
-                    if conflict_self:
-                        st.error(f"❌ Conflicto con tu propia agenda: {msg_self}")
-                    if not conflict_global and not conflict_self:
-                        st.success("Sin conflictos con la nueva configuración.")
+                        # Excluir el propio registro para no autocolisionar
+                        df_for_conf = df_master[df_master["row_id"] != row_current["row_id"]]
+                        extra_opts = sugerir_tutorias_extra(row_ctx, df_for_conf)
+                        if not extra_opts:
+                            st.error("No hay opciones válidas (L–J) para reubicar la tutoría extra sin choques. Ajusta otros bloques.")
+                            st.stop()
 
-                    can_update = not conflict_global and not conflict_self
-                    if st.button("💾 Guardar cambios", disabled=not can_update, key="save_edit_btn"):
-                        df_upd = df_master.copy()
-                        mask = (df_upd["row_id"]==row_current["row_id"])
-                        df_upd.loc[mask, ["dia","sincronía_inicio","sincronía_fin","tutoría_inicio","tutoría_fin","timestamp"]] = [
-                            new_dia, new_sinc_ini, new_sinc_fin, new_tut_ini, new_tut_fin,
-                            datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                        ]
-                        save_master(df_upd)
-                        backup_master(reason="edit")
-                        st.success("Cambios guardados correctamente.")
-                        record_card({
-                            **row_current,
-                            "dia": new_dia,
-                            "sincronía_inicio": new_sinc_ini,
-                            "sincronía_fin": new_sinc_fin,
-                            "tutoría_inicio": new_tut_ini,
-                            "tutoría_fin": new_tut_fin,
-                            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                        }, title="✏️ Registro actualizado")
-                        st.cache_data.clear()
+                        def _sort_key(opt):
+                            d, ti, tf = opt
+                            day_idx = DAYS_FULL.index(d) if d in DAYS_FULL else 99
+                            return (day_idx, ti, tf)
+
+                        extra_opts = sorted(extra_opts, key=_sort_key)
+                        labels_extra = [f"{d} {ti}–{tf}" for (d, ti, tf) in extra_opts]
+
+                        try:
+                            pre_idx = extra_opts.index((row_current["dia"], row_current["tutoría_inicio"], row_current["tutoría_fin"]))
+                        except ValueError:
+                            pre_idx = 0
+
+                        st.caption("Las tutorías extra solo pueden ubicarse de **Lunes a Jueves**, dentro de tus ventanas efectivas y sin cruces con tu propia agenda.")
+
+                        row_id = row_current["row_id"]
+                        widget_key = f"edit_extra_pick_idx__{row_id}"     # índice selectbox
+                        memory_key = f"edit_extra_pick_choice__{row_id}"  # tupla (día, ini, fin)
+
+                        prev_choice = st.session_state.get(memory_key)
+                        default_index = extra_opts.index(prev_choice) if prev_choice in extra_opts else pre_idx
+
+                        idx_new = st.selectbox(
+                            "Elige tutoría extra (2h)",
+                            options=list(range(len(labels_extra))),
+                            format_func=lambda i: labels_extra[i],
+                            index=default_index,
+                            key=widget_key
+                        )
+
+                        new_dia, new_tut_ini, new_tut_fin = extra_opts[idx_new]
+                        st.session_state[memory_key] = (new_dia, new_tut_ini, new_tut_fin)
+
+                        st.subheader("D) Validaciones y guardado")
+                        conflict_self_extra, msg_self_extra = hay_conflicto_self(
+                            docente=docente_edit, df_master=df_master, dia=new_dia,
+                            s_ini="00:00", s_fin="00:00", t_ini=new_tut_ini, t_fin=new_tut_fin,
+                            exclude_row_id=row_current["row_id"]
+                        )
+                        if conflict_self_extra:
+                            st.error(f"❌ Conflicto con tu propia agenda: {msg_self_extra}")
+
+                        dup_extra_edit_mask = (
+                            (df_master["docente"].str.lower()==docente_edit.lower()) &
+                            (df_master["asignatura"]==row_current["asignatura"]) &
+                            (df_master["paralelo_codigo"]==row_current["paralelo_codigo"]) &
+                            (df_master["ciclo"]==int(row_current["ciclo"])) &
+                            (df_master["dia"]==new_dia) &
+                            (df_master["sincronía_inicio"].astype(str).fillna("")=="") &
+                            (df_master["sincronía_fin"].astype(str).fillna("")=="") &
+                            (df_master["tutoría_inicio"]==new_tut_ini) &
+                            (df_master["tutoría_fin"]==new_tut_fin) &
+                            (df_master["row_id"]!=row_current["row_id"])
+                        )
+                        if dup_extra_edit_mask.any():
+                            st.error("Ya existe otra tutoría extra idéntica para esta clave.")
+
+                        can_update_extra = (not conflict_self_extra) and (not dup_extra_edit_mask.any())
+                        if can_update_extra:
+                            st.success("Sin conflictos con la nueva configuración.")
+
+                        if st.button("💾 Guardar cambios (tutoría extra)", disabled=not can_update_extra, key="save_edit_extra_btn"):
+                            df_upd = df_master.copy()
+                            mask = (df_upd["row_id"]==row_current["row_id"])
+                            df_upd.loc[mask, ["dia","tutoría_inicio","tutoría_fin","timestamp"]] = [
+                                new_dia, new_tut_ini, new_tut_fin, datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                            ]
+                            save_master(df_upd)
+                            backup_master(reason="edit_extra")
+                            st.success("Tutoría extra actualizada.")
+                            record_card({
+                                **row_current,
+                                "dia": new_dia,
+                                "sincronía_inicio": "",
+                                "sincronía_fin": "",
+                                "tutoría_inicio": new_tut_ini,
+                                "tutoría_fin": new_tut_fin,
+                                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                            }, title="✏️ Tutoría extra actualizada")
+                            st.cache_data.clear()
+                    else:
+                        # -------------- EDICIÓN: FILA NORMAL (SINC + TUT) --------------
+                        st.subheader("C) Nueva sincronía (1 hora)")
+                        df_for_suggest = df_master[df_master["row_id"]!=row_current["row_id"]]
+                        sinc_opts = sugerir_sincronia(row_ctx, df_for_suggest)
+                        if not sinc_opts:
+                            st.error("No hay opciones de sincronía válidas con las ventanas actuales.")
+                            st.stop()
+                        etiquetas = [f"{d} {ini}–{fin}" for (d, ini, fin) in sinc_opts]
+                        try:
+                            pre_idx = sinc_opts.index((row_current["dia"], row_current["sincronía_inicio"], row_current["sincronía_fin"]))
+                        except ValueError:
+                            pre_idx = 0
+                        idx_new_sinc = st.selectbox("Elige sincronía", options=list(range(len(etiquetas))),
+                                                    format_func=lambda i: etiquetas[i], index=pre_idx, key="edit_sinc_pick")
+                        new_dia, new_sinc_ini, new_sinc_fin = sinc_opts[idx_new_sinc]
+
+                        st.subheader("D) Nueva tutoría (2 horas)")
+                        
+
+
+                        tut_opts = tutorias_posibles(
+                            str(row_ctx.get("tipo_docente","")), new_dia, new_sinc_ini,
+                            row_context_for_excel=row_ctx, docente=docente_edit,
+                            df_master=df_master[df_master["row_id"]!=row_current["row_id"]]
+                        )
+
+                        # ⚠️ CORTE OBLIGATORIO SI NO HAY OPCIONES
+                        if not tut_opts:
+                            st.error("No hay opciones de tutoría válidas con esa sincronía. Elige otra sincronía.")
+                            st.stop()  # ← ESTA LÍNEA ES LA CLAVE
+
+                        labels_tut = [f"Opción {k}: {ti}–{tf}" for (k, ti, tf) in tut_opts]
+                        pre_tut_idx = 0
+                        for i,(k,ti,tf) in enumerate(tut_opts):
+                            if ti==row_current["tutoría_inicio"] and tf==row_current["tutoría_fin"] and new_dia==row_current["dia"]:
+                                pre_tut_idx = i; break
+                        idx_new_tut = st.selectbox(
+                            "Elige tutoría",
+                            options=list(range(len(labels_tut))),
+                            format_func=lambda i: labels_tut[i],
+                            index=pre_tut_idx,
+                            key="edit_tut_pick"
+                        )
+                        _, new_tut_ini, new_tut_fin = tut_opts[idx_new_tut]
+
+
+
+                        st.markdown("---")
+                        st.subheader("E) Validaciones y guardado")
+                        conflict_global, msg_global = hay_conflicto_sync_global(
+                            df_master=df_master, ciclo=int(row_ctx["ciclo"]), dia=new_dia,
+                            asignatura=str(row_ctx["asignatura"]), s_ini=new_sinc_ini, s_fin=new_sinc_fin,
+                            exclude_row_id=row_current["row_id"]
+                        )
+                        conflict_self, msg_self = hay_conflicto_self(
+                            docente=docente_edit, df_master=df_master, dia=new_dia,
+                            s_ini=new_sinc_ini, s_fin=new_sinc_fin, t_ini=new_tut_ini, t_fin=new_tut_fin,
+                            exclude_row_id=row_current["row_id"]
+                        )
+                        if conflict_global:
+                            st.error(f"❌ Conflicto de sincronía: {msg_global}")
+                        if conflict_self:
+                            st.error(f"❌ Conflicto con tu propia agenda: {msg_self}")
+                        if not conflict_global and not conflict_self:
+                            st.success("Sin conflictos con la nueva configuración.")
+
+                        can_update = not conflict_global and not conflict_self
+                        if st.button("💾 Guardar cambios", disabled=not can_update, key="save_edit_btn"):
+                            df_upd = df_master.copy()
+                            mask = (df_upd["row_id"]==row_current["row_id"])
+                            df_upd.loc[mask, ["dia","sincronía_inicio","sincronía_fin","tutoría_inicio","tutoría_fin","timestamp"]] = [
+                                new_dia, new_sinc_ini, new_sinc_fin, new_tut_ini, new_tut_fin,
+                                datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                            ]
+                            save_master(df_upd)
+                            backup_master(reason="edit")
+                            st.success("Cambios guardados correctamente.")
+                            record_card({
+                                **row_current,
+                                "dia": new_dia,
+                                "sincronía_inicio": new_sinc_ini,
+                                "sincronía_fin": new_sinc_fin,
+                                "tutoría_inicio": new_tut_ini,
+                                "tutoría_fin": new_tut_fin,
+                                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                            }, title="✏️ Registro actualizado")
+                            st.cache_data.clear()
 
 # =====================================================
 # ===================== DASHBOARD =====================
@@ -1408,7 +1823,6 @@ with tab_dash:
                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                        key="download_master_dash")
 
-
 # =====================================================
 # ====================== ADMIN ========================
 # =====================================================
@@ -1462,13 +1876,17 @@ with tab_admin:
                 full = os.path.join(BACKUP_DIR, sel)
                 if st.button("↩️ Restaurar este backup", type="secondary"):
                     lock = FileLock(DOCENTES_LOCK_PATH, timeout=10)
-                    with lock:
-                        # backup del actual, luego restaurar
-                        backup_docentes(reason="before-restore")
-                        shutil.copy2(full, DOCENTES_XLSX)
-                    st.success(f"Restaurado: {sel}")
-                    st.cache_data.clear()
-                    st.rerun()
+                    try:
+                        with lock:
+                            backup_docentes(reason="before-restore")
+                            shutil.copy2(full, DOCENTES_XLSX)
+                        st.success(f"Restaurado: {sel}")
+                        st.cache_data.clear()
+                        st.rerun()
+                    except Timeout:
+                        st.error("No se pudo obtener el bloqueo de docentes.xlsx. Intenta nuevamente en unos segundos.")
+                    except Exception as e:
+                        st.error(f"Error al restaurar backup: {e}")
 
     st.markdown("---")
     st.subheader("Cargar nuevo docentes.xlsx")
@@ -1476,7 +1894,7 @@ with tab_admin:
     up = st.file_uploader("Sube el archivo Excel (hoja 'docentes')", type=["xlsx"], accept_multiple_files=False)
     if up is not None:
         try:
-            # Leer la hoja exacta
+            # Leer la hoja exacta (validación inicial rápida)
             new_df = pd.read_excel(up, sheet_name=DOCENTES_SHEET, engine="openpyxl")
         except ValueError as e:
             st.error(f"El archivo no contiene la hoja '{DOCENTES_SHEET}'. Detalle: {e}")
@@ -1499,23 +1917,16 @@ with tab_admin:
         can_apply = ok  # solo permitimos reemplazar si pasa validación estricta
         if st.button("✅ Reemplazar docentes.xlsx", disabled=not can_apply, type="primary"):
             try:
-                # Reemplazo seguro a partir del archivo subido (no del DF),
-                # con validación, backup y movimiento atómico.
                 replace_docentes_from_upload(up)
-                st.success("✅ Archivo reemplazado correctamente en /var/data/docentes.xlsx.")
+                st.success(f"✅ Archivo reemplazado correctamente: {DOCENTES_XLSX}")
                 st.cache_data.clear()
                 st.rerun()
-            except Timeout:
-                st.error("Archivo en uso. Intenta nuevamente en unos segundos.")
             except RuntimeError as e:
                 st.error(str(e))
             except Exception as e:
                 st.error(f"Error inesperado al reemplazar: {e}")
 
-
-
-    st.caption("..."
-               "Tras reemplazar el archivo, la app limpia cachés y recarga datos automáticamente.")
+    st.caption("Tras reemplazar el archivo, la app limpia cachés y recarga datos automáticamente.")
 
     st.markdown("---")
     st.subheader("🧹 Borrar/limpiar registros (horarios_master.xlsx)")
@@ -1540,18 +1951,23 @@ with tab_admin:
                 if pick_m != "(Ninguno)":
                     if st.button("↩️ Restaurar este backup del consolidado", key="btn_restore_master"):
                         lock = FileLock(LOCK_PATH, timeout=10)
-                        with lock:
-                            backup_master(reason="before-restore")  # respaldo del actual antes de restaurar
-                            shutil.copy2(os.path.join(BACKUP_DIR, pick_m), MASTER_XLSX)
-                        st.success(f"Restaurado: {pick_m}")
-                        st.cache_data.clear()
-                        st.rerun()
+                        try:
+                            with lock:
+                                backup_master(reason="before-restore")
+                                shutil.copy2(os.path.join(BACKUP_DIR, pick_m), MASTER_XLSX)
+                            st.success(f"Restaurado: {pick_m}")
+                            st.cache_data.clear()
+                            st.rerun()
+                        except Timeout:
+                            st.error("No se pudo obtener el bloqueo de horarios_master.xlsx. Intenta nuevamente.")
+                        except Exception as e:
+                            st.error(f"Error al restaurar: {e}")
 
         # Ejecuta el vaciado si se confirmó
         if btn_reset:
             try:
                 reset_master_to_empty()
-                st.success("Consolidado vaciado correctamente. (Backup creado en /backups/).")
+                st.success("Consolidado vaciado correctamente. (Se creó un backup en /backups/).")
                 st.cache_data.clear()
                 st.rerun()
             except Timeout:
@@ -1559,8 +1975,4 @@ with tab_admin:
             except Exception as e:
                 st.error(f"Error al vaciar: {e}")
 
-
-
 st.caption("")
-
-
