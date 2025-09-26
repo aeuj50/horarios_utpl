@@ -1157,9 +1157,9 @@ with tab_reg:
         )
         extras_restantes = max(0, extras_totales - extras_done)
 
-        st.subheader("➕ Tutorías extra por múltiples paralelos")
+        st.subheader("➕ Declaración de tutorías por los demás paralelos")
         colx1, colx2, colx3 = st.columns(3)
-        colx1.metric("Paralelos en la fila", total_pars)
+        colx1.metric("Paralelos", total_pars)
         colx2.metric("Tutorías extra requeridas", extras_totales)
         colx3.metric("Pendientes de declarar", extras_restantes)
 
@@ -1174,10 +1174,10 @@ with tab_reg:
             st.session_state["extra_ctx_key"] = ctx_key
 
         if extras_restantes <= 0:
-            st.success("No tienes tutorías extra pendientes para esta fila.")
+            st.success("No tienes tutorías pendientes para esta asignatura.")
         else:
             st.info(
-                "Debes declarar **{n}** tutoría(s) extra de **2h** (L–J), dentro de tu franja base, "
+                "Debes declarar **{n}** tutoría(s) de **2h** (L–J), dentro de tu franja base, para cada paralelo "
                 "sin cruzarse con tus propios bloques y sin solaparse entre sí."
                 .format(n=extras_restantes)
             )
