@@ -1124,7 +1124,7 @@ with tab_reg:
     st.markdown("---")
 
     # Paso 5: Tutoría
-    st.subheader("5) Tutoría asíncrona (2 horas de conexión en el EVA) | vinculada a la hora de sincronía")
+    st.subheader("5) Tutoría asíncrona (2 horas de conexión en el EVA) | vinculada a la hora de sincronía seleccionada")
     tut_pick = None
     if sincronia_pick and tipo_docente_val:
         dia_sel, sinc_ini_sel, _ = sincronia_pick
@@ -1133,7 +1133,7 @@ with tab_reg:
             row_context_for_excel=row_base, docente=docente_input, df_master=df_master
         )
         if tut_opts:
-            labels_tut = [f"Opción {k}: {ti}–{tf}" for (k, ti, tf) in tut_opts]
+            labels_tut = [f"Opción: {ti}–{tf}" for (ti, tf) in tut_opts]
             idx_tut = st.selectbox("Elige tutoría vinculada a la hora de sincronía", options=list(range(len(labels_tut))),
                                    format_func=lambda i: labels_tut[i], key="tut_select_reg")
             k, tut_ini, tut_fin = tut_opts[idx_tut]
@@ -1157,10 +1157,10 @@ with tab_reg:
         )
         extras_restantes = max(0, extras_totales - extras_done)
 
-        st.subheader("➕ Declaración de tutorías asíncronas por los demás paralelos")
+        st.subheader("➕ Declaración de tutorías asíncronas para los demás paralelos")
         colx1, colx2, colx3 = st.columns(3)
         colx1.metric("Paralelos (para este registro)", total_pars)
-        colx2.metric("Tutorías adicionales a la seleccionada", extras_totales)
+        colx2.metric("Tutorías asíncronas adicionales a la seleccionada requeridas", extras_totales)
         colx3.metric("Pendientes de declarar", extras_restantes)
 
         # Clave de contexto (docente|asignatura|paralelo|ciclo)
@@ -1177,7 +1177,7 @@ with tab_reg:
             st.success("No tienes tutorías pendientes para esta asignatura.")
         else:
             st.info(
-                "Debes declarar **{n}** tutoría(s) de **2h**, por cada paralelo. Ya registraste una, vinculada a la hora síncrona."
+                "Debes declarar **{n}** tutoría(s) de **2h**, por cada paralelo. Ya registraste una, vinculada a la hora síncrona. "
                 "Ahora, debes registrar para tu(s) otro(s) paralelo(s), otras 2h asíncronas (conexión en el EVA), sin cruzarse con tus propios horarios."
                 .format(n=extras_restantes)
             )
@@ -1224,7 +1224,7 @@ with tab_reg:
                     default_index = valid_opts.index(prev_choice) if prev_choice in valid_opts else 0
 
                     sel_idx = st.selectbox(
-                        f"Elige tutoría extra #{i+1} (2h)",
+                        f"Elige tutoría asíncrona (conexión en el EVA) #{i+2} por el otro paralelo que tienes",
                         options=list(range(len(valid_opts))),
                         format_func=lambda k: labels[k],
                         index=default_index,
