@@ -1099,7 +1099,7 @@ with tab_reg:
                 row_base["docente"] = docente_input  # para self-conflict
                 eff = effective_windows_by_day(row_base)
                 dias_txt = ", ".join([f"{d}({'; '.join([a+'–'+b for (a,b) in eff[d]])})" for d in eff])
-                st.success(f"**Ciclo:** {ciclo_val} | **Tipo:** `{tipo_docente_val}` | **Ventanas efectivas:** {dias_txt}")
+                st.success(f"**Ciclo:** {ciclo_val} | **Tipo:** `{tipo_docente_val}` | **Días y horas permitidos:** {dias_txt}")
     else:
         st.info("Selecciona asignatura para ver paralelos.")
 
@@ -1124,7 +1124,7 @@ with tab_reg:
     st.markdown("---")
 
     # Paso 5: Tutoría
-    st.subheader("5) Tutoría (2 horas)")
+    st.subheader("5) Tutoría asíncrona (2 horas de conexión en el EVA) | vinculada a la hora de sincronía")
     tut_pick = None
     if sincronia_pick and tipo_docente_val:
         dia_sel, sinc_ini_sel, _ = sincronia_pick
@@ -1134,7 +1134,7 @@ with tab_reg:
         )
         if tut_opts:
             labels_tut = [f"Opción {k}: {ti}–{tf}" for (k, ti, tf) in tut_opts]
-            idx_tut = st.selectbox("Elige tutoría (bloques de 60')", options=list(range(len(labels_tut))),
+            idx_tut = st.selectbox("Elige tutoría vinculada a la hora de sincronía", options=list(range(len(labels_tut))),
                                    format_func=lambda i: labels_tut[i], key="tut_select_reg")
             k, tut_ini, tut_fin = tut_opts[idx_tut]
             tut_pick = (k, tut_ini, tut_fin)
@@ -1157,10 +1157,10 @@ with tab_reg:
         )
         extras_restantes = max(0, extras_totales - extras_done)
 
-        st.subheader("➕ Declaración de tutorías por los demás paralelos")
+        st.subheader("➕ Declaración de tutorías asíncronas por los demás paralelos")
         colx1, colx2, colx3 = st.columns(3)
-        colx1.metric("Paralelos", total_pars)
-        colx2.metric("Tutorías extra requeridas", extras_totales)
+        colx1.metric("Paralelos (para este registro)", total_pars)
+        colx2.metric("Tutorías adicionales a la seleccionada", extras_totales)
         colx3.metric("Pendientes de declarar", extras_restantes)
 
         # Clave de contexto (docente|asignatura|paralelo|ciclo)
@@ -1177,8 +1177,8 @@ with tab_reg:
             st.success("No tienes tutorías pendientes para esta asignatura.")
         else:
             st.info(
-                "Debes declarar **{n}** tutoría(s) de **2h** (L–J), dentro de tu franja base, para cada paralelo "
-                "sin cruzarse con tus propios bloques y sin solaparse entre sí."
+                "Debes declarar **{n}** tutoría(s) de **2h**, por cada paralelo. Ya registraste una, vinculada a la hora síncrona."
+                "Ahora, debes registrar para tu(s) otro(s) paralelo(s), otras 2h asíncronas (conexión en el EVA), sin cruzarse con tus propios horarios."
                 .format(n=extras_restantes)
             )
 
@@ -1251,7 +1251,7 @@ with tab_reg:
         total_paralelos_doc = len(df_doc[df_doc["docente_key"]==normalize_key(docente_input)])
         req_sinc = sincronias_requeridas(total_paralelos_doc)
         ya_tiene = (df_master["docente"].str.lower()==docente_input.lower()).sum()
-        st.caption(f"Sincronías requeridas/semana: **{req_sinc}** | Ya registradas: **{ya_tiene}**")
+        st.caption(f"Sin observaciones.")
     if row_base is not None and sincronia_pick and tut_pick:
         dia_sel, sinc_ini_sel, sinc_fin_sel = sincronia_pick
         _, tut_ini, tut_fin = tut_pick
