@@ -1133,7 +1133,7 @@ with tab_reg:
             row_context_for_excel=row_base, docente=docente_input, df_master=df_master
         )
         if tut_opts:
-            labels_tut = [f"Opción: {ti}–{tf}" for (ti, tf) in tut_opts]
+            labels_tut = [f"Opción {k}: {ti}–{tf}" for (k, ti, tf) in tut_opts]
             idx_tut = st.selectbox("Elige tutoría vinculada a la hora de sincronía", options=list(range(len(labels_tut))),
                                    format_func=lambda i: labels_tut[i], key="tut_select_reg")
             k, tut_ini, tut_fin = tut_opts[idx_tut]
