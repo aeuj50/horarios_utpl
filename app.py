@@ -140,6 +140,10 @@ def label_block(docente, asignatura, paralelo_codigo, tipo):
     short = "SINC" if tipo == "SINC" else "TUT"
     return f"{short} · {asignatura} ({paralelo_codigo}) · {docente}"
 
+def _has_iti(code) -> bool:
+    """True si paralelo_codigo contiene 'ITI' (insensible a mayúsculas)."""
+    return "ITI" in str(code or "").upper()
+
 # =========================
 # ARCHIVOS + BACKUPS (CON LOCK)
 # =========================
@@ -592,9 +596,20 @@ def ventanas_tipo_for_day(tipo_docente, dia):
     return ventanas_tipo_docente(tipo_docente).get(dia, [])
 
 # -------- CONFLICTOS --------
-def hay_conflicto_sync_global(df_master, ciclo, dia, asignatura, s_ini, s_fin, exclude_row_id=None):
+def hay_conflicto_sync_global(
+    df_master,
+    ciclo,
+    dia,
+    asignatura,
+    s_ini,
+    s_fin,
+    paralelo_codigo_actual=None,  # ← NUEVO
+    exclude_row_id=None
+):
     """
     Conflicto si en el mismo ciclo y mismo día existe OTRA asignatura cuya sincronía se solape.
+    EXCEPCIÓN: si ambos paralelos (el actual y el del registro comparado) contienen 'ITI',
+    entonces el cruce de sincronía está permitido.
     """
     if s_ini is None or s_fin is None:
         return False, ""
@@ -609,9 +624,16 @@ def hay_conflicto_sync_global(df_master, ciclo, dia, asignatura, s_ini, s_fin, e
         asig_row = str(row.get("asignatura",""))
         if normalize_key(asig_row) == normalize_key(asignatura or ""):
             continue
+
         if overlaps(s_ini, s_fin, row.get("sincronía_inicio",""), row.get("sincronía_fin","")):
+            # ← EXCEPCIÓN ITI: si ambos paralelos son ITI, permitir el cruce
+            if _has_iti(paralelo_codigo_actual) and _has_iti(row.get("paralelo_codigo", "")):
+                continue  # permitido, no es conflicto
+
             return True, f"Cruce de sincronía con otra asignatura en ciclo {ciclo} ({asig_row})."
+
     return False, ""
+
 
 def hay_conflicto_self(docente, df_master, dia, s_ini, s_fin, t_ini, t_fin, exclude_row_id=None):
     """
@@ -666,8 +688,10 @@ def sugerir_sincronia(row_docente, df_master):
 
                 conflict_g, _ = hay_conflicto_sync_global(
                     df_master=df_master, ciclo=ciclo_val, dia=d,
-                    asignatura=asignatura_val, s_ini=s, s_fin=fin
+                    asignatura=asignatura_val, s_ini=s, s_fin=fin,
+                    paralelo_codigo_actual=row_docente.get("paralelo_codigo")
                 )
+
                 if conflict_g:
                     continue
 
@@ -1258,8 +1282,10 @@ with tab_reg:
 
         conflict_global, msg_global = hay_conflicto_sync_global(
             df_master=df_master, ciclo=int(row_base["ciclo"]), dia=dia_sel,
-            asignatura=str(row_base["asignatura"]), s_ini=sinc_ini_sel, s_fin=sinc_fin_sel
+            asignatura=str(row_base["asignatura"]), s_ini=sinc_ini_sel, s_fin=sinc_fin_sel,
+            paralelo_codigo_actual=row_base.get("paralelo_codigo")
         )
+
         conflict_self, msg_self = hay_conflicto_self(
             docente=docente_input, df_master=df_master, dia=dia_sel,
             s_ini=sinc_ini_sel, s_fin=sinc_fin_sel, t_ini=tut_ini, t_fin=tut_fin
@@ -1698,11 +1724,14 @@ with tab_edit:
 
                         st.markdown("---")
                         st.subheader("E) Validaciones y guardado")
+
                         conflict_global, msg_global = hay_conflicto_sync_global(
                             df_master=df_master, ciclo=int(row_ctx["ciclo"]), dia=new_dia,
                             asignatura=str(row_ctx["asignatura"]), s_ini=new_sinc_ini, s_fin=new_sinc_fin,
+                            paralelo_codigo_actual=row_ctx.get("paralelo_codigo"),
                             exclude_row_id=row_current["row_id"]
                         )
+
                         conflict_self, msg_self = hay_conflicto_self(
                             docente=docente_edit, df_master=df_master, dia=new_dia,
                             s_ini=new_sinc_ini, s_fin=new_sinc_fin, t_ini=new_tut_ini, t_fin=new_tut_fin,
@@ -1786,7 +1815,7 @@ with tab_dash:
         st.dataframe(cov.sort_values("ciclo").reset_index(drop=True), use_container_width=True)
 
     st.markdown("### Cronograma global con filtros")
-    colf1, colf2, colf3, colf4 = st.columns(4)
+    colf1, colf2, colf3, colf4, colf5 = st.columns(5)
     ciclos_disponibles = sorted([int(c) for c in df_master["ciclo"].dropna().unique().tolist()])
     ciclo_global = colf1.selectbox("Ciclo", options=["(Todos)"]+ciclos_disponibles, key="dash_ciclo")
     docentes_global = ["(Todos)"] + sorted(df_master["docente"].dropna().unique().tolist())
@@ -1795,26 +1824,56 @@ with tab_dash:
     paralelo_gl = colf3.selectbox("Paralelo", options=["(Todos)"]+paralelos_all, key="dash_paralelo")
     tipo_opts = ["(Todos)"] + sorted(df_master["tipo_docente"].dropna().unique().tolist())
     tipo_gl = colf4.selectbox("Tipo de docente", options=tipo_opts, key="dash_tipo")
+    tipo_sesion = colf5.selectbox(
+    "Tipo de sesión",
+    options=["(Ambas)", "Solo sincronía", "Solo tutoría"],
+    key="dash_sesion"
+    )
+
+
 
     df_view = df_master.copy()
-    if ciclo_global != "(Todos)":
-        df_view = df_view[df_view["ciclo"]==ciclo_global]
-    if docente_gl != "(Todos)":
-        df_view = df_view[df_view["docente"]==docente_gl]
-    if paralelo_gl != "(Todos)":
-        df_view = df_view[df_view["paralelo_codigo"]==paralelo_gl]
-    if tipo_gl != "(Todos)":
-        df_view = df_view[df_view["tipo_docente"]==tipo_gl]
 
+    # Filtros existentes
+    if ciclo_global != "(Todos)":
+        df_view = df_view[df_view["ciclo"] == ciclo_global]
+    if docente_gl != "(Todos)":
+        df_view = df_view[df_view["docente"] == docente_gl]
+    if paralelo_gl != "(Todos)":
+        df_view = df_view[df_view["paralelo_codigo"] == paralelo_gl]
+    if tipo_gl != "(Todos)":
+        df_view = df_view[df_view["tipo_docente"] == tipo_gl]
+
+    # ⬅️ NUEVO: Filtro por Tipo de sesión (aplícalo DESPUÉS de los filtros anteriores y ANTES de dibujar)
+    df_view = df_view.copy()  # defensivo, evitamos SettingWithCopyWarning
+    if tipo_sesion == "Solo sincronía":
+        # ocultar tutorías (incluye las EXTRA que son solo tutoría)
+        df_view["tutoría_inicio"] = ""
+        df_view["tutoría_fin"] = ""
+    elif tipo_sesion == "Solo tutoría":
+        # ocultar sincronías
+        df_view["sincronía_inicio"] = ""
+        df_view["sincronía_fin"] = ""
+    # si es "(Ambas)", no tocamos nada
+
+    # Renderizado como lo tienes
     if ciclo_global == "(Todos)":
         st.info("Selecciona un **ciclo** para ver la malla semanal. Mientras tanto, revisa la tabla filtrada.")
         st.dataframe(tidy_table(df_view), use_container_width=True)
     else:
         highlight_name = None if docente_gl == "(Todos)" else docente_gl
         paralelo_val = None if paralelo_gl == "(Todos)" else paralelo_gl
-        styled = build_cronograma(df_view, ciclo=ciclo_global, highlight_docente=highlight_name,
-                                  start="07:00", end="22:00", step=60, paralelo_filter=paralelo_val)
+        styled = build_cronograma(
+            df_view,
+            ciclo=ciclo_global,
+            highlight_docente=highlight_name,
+            start="07:00",
+            end="22:00",
+            step=60,
+            paralelo_filter=paralelo_val
+        )
         st.dataframe(styled, use_container_width=True, height=600)
+
 
     st.markdown("### Exportación")
     bytes_xlsx = download_excel_bytes(df_master)
